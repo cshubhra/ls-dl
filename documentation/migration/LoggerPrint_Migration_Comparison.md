@@ -12,6 +12,8 @@ This document provides a side-by-side comparison of the original LotusScript `Lo
 | Context Management | Uses `DynamicArguments` | Uses `DynamicArguments` + SLF4J MDC |
 | Output Mechanism | Direct `Print` statement | Configurable Logback appenders |
 | Configuration | Notes.ini variables | XML/Groovy configuration files |
+| Formatting | Hardcoded format | Customizable patterns |
+| Thread Safety | None (single-threaded) | Full thread safety with MDC |
 
 ## Method Comparison
 
@@ -113,6 +115,38 @@ private String getModuleName(DynamicArguments id) {
 }
 ```
 
+## Parameter Handling Comparison
+
+### LotusScript Parameter Handling
+
+```lss
+' Basic string message
+Call Logger.info("User " & username & " logged in", id)
+
+' String concatenation for parameters
+Call Logger.debug("Process completed in " & CStr(seconds) & " seconds with " & CStr(itemCount) & " items", id)
+
+' No built-in lazy evaluation - all strings are constructed regardless of log level
+```
+
+### Java Parameter Handling
+
+```java
+// Using parameter placeholders - more efficient and readable
+logger.info("User {} logged in", username, context);
+
+// Multiple parameters with type-safety
+logger.debug("Process completed in {} seconds with {} items", seconds, itemCount, context);
+
+// Lazy evaluation - message is only constructed if debug level is enabled
+if (logger.isDebugEnabled()) {
+    logger.debug("Complex calculation result: {}", expensiveCalculation(), context);
+}
+
+// Using lambda for extremely expensive logging
+logger.trace("Detailed object state: {}", () -> objectToDetailedString(complexObject), context);
+```
+
 ## Usage Comparison
 
 ### LotusScript Usage
@@ -125,7 +159,16 @@ Call setLogLevel("libTracer", LL_DEBUG)
 ' Creating context and logging
 Dim id As DynamicArguments
 Set id = args().in("MyModule").in("MyProcedure")
-Call logInfo("This is an info message")
+Call logInfo("This is an info message", id)
+
+' Exception reporting - manual
+On Error Resume Next
+Call someFunction()
+If Err Then
+    Call logError("Error in someFunction: " & CStr(Err) & " - " & Error$, id)
+    Exit Sub
+End If
+On Error Goto 0
 ```
 
 ### Java Usage
@@ -138,6 +181,21 @@ LogLevelManager.setLogLevel("com.yourcompany.tracer", LogLevelManager.LL_DEBUG);
 // Creating context and logging
 DynamicArguments context = args().in("MyModule").in("MyMethod");
 logger.info("This is an info message", context);
+
+// Exception handling - built-in stack trace support
+try {
+    someMethod();
+} catch (Exception e) {
+    logger.error("Error in someMethod: {}", e.getMessage(), e, context);
+}
+
+// Conditional logging
+if (logger.isDebugEnabled()) {
+    logger.debug("Complex status: {}", generateComplexStatus(), context);
+}
+
+// Using marker interfaces for categorization
+logger.info(MarkerFactory.getMarker("AUDIT"), "User {} performed action {}", username, action, context);
 ```
 
 ## Configuration Comparison
@@ -150,69 +208,171 @@ LogStatusBar=1
 
 # Redirect logging to a file
 Debug_Outfile=c:\temp\StatusBarLogging.txt
+
+# Set log level for specific modules
+Debug_LogModules=libTracer:5;libViewRefresh:3
 ```
 
 ### Java Configuration (logback.xml)
 
 ```xml
-<configuration>
+<configuration scan="true" scanPeriod="30 seconds">
     <!-- Console Appender -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss} [%level] [%logger{36}] %msg%n</pattern>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} [%thread] [%level] [%logger{36}] %X{context} %msg%n</pattern>
         </encoder>
     </appender>
     
-    <!-- File Appender -->
-    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+    <!-- Rolling File Appender -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>logs/application.log</file>
-        <append>true</append>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logs/application.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>3GB</totalSizeCap>
+        </rollingPolicy>
         <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss} [%level] [%logger{36}] %msg%n</pattern>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} [%thread] [%level] [%logger{36}] %X{context} %msg%n</pattern>
         </encoder>
+    </appender>
+    
+    <!-- Asynchronous File Appender for better performance -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="FILE" />
+        <queueSize>500</queueSize>
+        <discardingThreshold>0</discardingThreshold>
     </appender>
     
     <!-- Root Logger -->
     <root level="WARN">
         <appender-ref ref="CONSOLE" />
-        <appender-ref ref="FILE" />
+        <appender-ref ref="ASYNC_FILE" />
     </root>
     
-    <!-- Application Loggers -->
+    <!-- Application Loggers with specific levels -->
     <logger name="com.yourcompany.application" level="INFO" />
+    <logger name="com.yourcompany.tracer" level="DEBUG" />
+    
+    <!-- Special category for audit logs -->
+    <logger name="AUDIT" level="INFO" additivity="false">
+        <appender-ref ref="AUDIT_APPENDER" />
+    </logger>
 </configuration>
 ```
 
-## Key Differences and Improvements
+### Java Programmatic Configuration
 
-1. **Thread Safety**: The Java implementation is thread-safe, using SLF4J's MDC for context management.
+```java
+// Programmatically changing log levels at runtime
+public void setModuleLogLevel(String module, int level) {
+    LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
+    ch.qos.logback.classic.Logger logger = loggerContext.getLogger(module);
+    
+    switch (level) {
+        case LL_NONE:    logger.setLevel(Level.OFF);   break;
+        case LL_ASSERT:  logger.setLevel(Level.ERROR); break;
+        case LL_ERROR:   logger.setLevel(Level.ERROR); break;
+        case LL_WARN:    logger.setLevel(Level.WARN);  break;
+        case LL_INFO:    logger.setLevel(Level.INFO);  break;
+        case LL_DEBUG:   logger.setLevel(Level.DEBUG); break;
+        case LL_VERBOSE: logger.setLevel(Level.TRACE); break;
+        case LL_ALL:     logger.setLevel(Level.ALL);   break;
+    }
+}
+```
 
-2. **Configurability**: Logback provides extensive configuration options through XML or Groovy files, allowing for:
-   - Multiple appenders (console, file, database, etc.)
-   - Custom layouts and patterns
-   - Rolling file policies
-   - Filtering based on log level or content
+## Advanced Features Comparison
 
-3. **Performance**: Logback includes performance optimizations:
-   - Asynchronous logging
-   - Conditional logging (checking log level before message construction)
-   - Efficient parameter substitution
+### LotusScript (Limited Features)
 
-4. **Integration**: The Java implementation integrates with:
-   - Spring Framework for dependency injection
-   - Java EE/Jakarta EE environments
-   - Testing frameworks for verification
+```lss
+' Basic timing measurement
+Dim startTime as New NotesDateTime()
+startTime.SetNow()
+' ... operation ...
+Dim endTime as New NotesDateTime()
+endTime.SetNow()
+Dim diff as Integer
+diff = DateDifference(startTime, endTime)
+Call logInfo("Operation completed in " & Cstr(diff) & " milliseconds", id)
+```
 
-5. **Extensibility**: Logback's architecture allows for:
-   - Custom appenders
-   - Custom layouts
-   - Custom filters
-   - Custom converters for pattern layouts
+### Java (Rich Feature Set)
 
-6. **Monitoring**: Logback provides:
-   - JMX monitoring
-   - Status monitoring
-   - Conditional reloading of configuration
+```java
+// Using SLF4J Markers for categorization
+Marker securityMarker = MarkerFactory.getMarker("SECURITY");
+logger.info(securityMarker, "User {} accessed sensitive data", username, context);
+
+// Parameterized logging with formatting
+logger.info("Value within range [{}-{}]: {}", min, max, value, context);
+
+// Timing operations with MDC
+MDC.put("operationId", UUID.randomUUID().toString());
+long start = System.currentTimeMillis();
+try {
+    // ... operation ...
+} finally {
+    long duration = System.currentTimeMillis() - start;
+    logger.info("Operation completed in {} ms", duration, context);
+    MDC.remove("operationId");
+}
+
+// Structured logging with JSON format (using logstash-logback-encoder)
+// In configuration:
+// <encoder class="net.logstash.logback.encoder.LogstashEncoder" />
+Map<String, Object> structuredData = new HashMap<>();
+structuredData.put("userId", userId);
+structuredData.put("action", actionType);
+structuredData.put("items", itemCount);
+logger.info(LogstashMarkers.append("data", structuredData), "Business operation completed", context);
+```
+
+## Log Level Mapping
+
+| LotusScript Level | Value | Java/Logback Level | Description |
+|------------------|-------|-------------------|-------------|
+| LL_NONE          | 0     | OFF               | No logging |
+| LL_ASSERT        | 1     | ERROR             | Critical assertions, always logged |
+| LL_ERROR         | 2     | ERROR             | Error conditions |
+| LL_WARN          | 3     | WARN              | Warning conditions |
+| LL_INFO          | 4     | INFO              | Informational messages |
+| LL_DEBUG         | 5     | DEBUG             | Debug messages |
+| LL_VERBOSE       | 6     | TRACE             | Detailed tracing |
+| LL_ALL           | 255   | ALL               | All messages |
+
+## Key Benefits of Logback Implementation
+
+1. **Performance Optimizations**:
+   - Lazy message construction - messages are only built if the level is enabled
+   - Parameter substitution instead of string concatenation
+   - Asynchronous logging for minimal impact on application performance
+   - Filtering at the earliest possible point to reduce overhead
+
+2. **Advanced Configuration**:
+   - Dynamic reconfiguration without application restart
+   - Environment variable substitution in config files
+   - Conditional processing in configuration
+   - Programmatic configuration options
+
+3. **Enterprise-ready Features**:
+   - Integration with monitoring systems (JMX, Prometheus, etc.)
+   - Structured logging with JSON format for log aggregation systems (ELK, Splunk)
+   - Specialized appenders for databases, JMS, SMTP, Syslog, etc.
+   - Automatic log file rotation and archiving policies
+
+4. **Development Benefits**:
+   - Testing support through SLF4J test frameworks
+   - Contextual logging with MDC
+   - Stack trace filtering and formatting
+   - Conditional logging for expensive operations
+
+5. **Monitoring & Troubleshooting**:
+   - Built-in status reporting
+   - Internal error handling
+   - Runtime log level adjustment without restart
+   - Extensive metrics for logging system performance
 
 ## Migration Path
 
@@ -228,15 +388,13 @@ Debug_Outfile=c:\temp\StatusBarLogging.txt
    - Preserve log formats for consistency
    - Add new capabilities as needed
 
-## Log Level Mapping
+4. **Feature Enhancement Phases**:
+   - Phase 1: Basic logging with matching functionality
+   - Phase 2: Add MDC context and formatting improvements
+   - Phase 3: Implement structured logging and specialized appenders
+   - Phase 4: Integration with monitoring and alerting systems
 
-| LotusScript Level | Value | Java/Logback Level |
-|------------------|-------|-------------------|
-| LL_NONE          | 0     | OFF               |
-| LL_ASSERT        | 1     | ERROR             |
-| LL_ERROR         | 2     | ERROR             |
-| LL_WARN          | 3     | WARN              |
-| LL_INFO          | 4     | INFO              |
-| LL_DEBUG         | 5     | DEBUG             |
-| LL_VERBOSE       | 6     | TRACE             |
-| LL_ALL           | 255   | ALL               |
+5. **Code Adaptation Guidelines**:
+   - Replace string concatenation with parameterized logging
+   - Add exception objects to error log calls
+   - Use conditional isXxxEnabled() checks for expensive logging
